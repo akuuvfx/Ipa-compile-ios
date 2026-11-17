@@ -1,1 +1,37 @@
-
+name: Build IPA
+on:
+  push:
+    paths: ["source.zip"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build IPA
+        run: |
+          set -eo pipefail
+          X=$(ls -d /Applications/Xcode_*.app | grep -vi beta | sort -V | tail -1)
+          sudo xcode-select -s "$X"
+          mkdir src && unzip -q source.zip -d src
+          cd src
+          P=$(find . -maxdepth 3 -name project.yml -not -path '*/__MACOSX/*' | head -1)
+          if [ -n "$P" ]; then brew install xcodegen; (cd "$(dirname "$P")" && xcodegen generate); fi
+          W=$(find . -maxdepth 4 -name '*.xcworkspace' -not -path '*/Pods/*' -not -path '*/__MACOSX/*' -not -path '*.xcodeproj/*' | head -1)
+          J=$(find . -maxdepth 4 -name '*.xcodeproj' -not -path '*/Pods/*' -not -path '*/__MACOSX/*' | head -1)
+          if [ -n "$W" ]; then ARGS=(-workspace "$W"); else ARGS=(-project "$J"); fi
+          SCHEME=$(xcodebuild -list -json "${ARGS[@]}" | python3 -c "import sys,json; d=json.load(sys.stdin); d=d.get('workspace') or d.get('project'); print(d['schemes'][0])")
+          xcodebuild "${ARGS[@]}" -scheme "$SCHEME" -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath ../build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+          cd ..
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          mkdir Payload && cp -R "$APP" Payload/
+          IPA="${GITHUB_REPOSITORY#*/}-$GITHUB_RUN_NUMBER.ipa"
+          zip -qr "$IPA" Payload
+          echo "IPA=$IPA" >> "$GITHUB_ENV"
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "build-$GITHUB_RUN_NUMBER" "$IPA" --title "Build $GITHUB_RUN_NUMBER" --notes "Compilé depuis source.zip"
